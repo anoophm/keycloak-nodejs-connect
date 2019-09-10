@@ -20,70 +20,149 @@ const admin = require('./utils/realm');
 const TestVector = require('./utils/helper').TestVector;
 
 const page = require('./utils/webdriver').newPage;
+const realmAccountPage = require('./utils/webdriver').realmAccountPage;
+const driver = require('./utils/webdriver').driver;
 const NodeApp = require('./fixtures/node-console/index').NodeApp;
+const session = require('express-session');
 
 const realmManager = admin.createRealm();
 const app = new NodeApp();
-let client;
 
 test('setup', t => {
-  return client = realmManager.then((realm) => {
-    return admin.createClient(app.publicClient());
+  return realmManager.then(() => {
+    return admin.createClient(app.publicClient())
+      .then((installation) => {
+        return app.build(installation);
+      });
   });
-})
+});
+
+// test('setup', t => {
+//   return client = realmManager.then((realm) => {
+//     return admin.createClient(app.publicClient());
+//   });
+// });
 
 test('Should be able to access public page', t => {
   t.plan(1);
 
-  return client.then((installation) => {
-    app.build(installation);
-
-    page.get(app.port);
-    return page.output().getText().then(function(text) {
-      t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
-    })
-  });
+  return page.get(app.port)
+    .then(() => page.output().getText()
+      .then(text => {
+        t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+      })
+    );
 });
 
 test('Should login with admin credentials', t => {
   t.plan(3);
 
-  return client.then((installation) => {
-    app.build(installation);
-    page.get(app.port);
+  return page.get(app.port)
+    .then(() => page.output().getText()
+      .then(text => {
+        t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+        return page.logInButton()
+          .then(webElement => webElement.click())
+          .then(() => page.login('test-admin', 'password'))
+          .then(() => page.events().getText().then(text => {
+            t.equal(text, 'Auth Success', 'User should be authenticated');
 
-    return page.output().getText().then(function(text) {
-      t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
-      page.logInButton().click();
-      page.login('test-admin', 'password');
-
-      return page.events().getText().then(function(text) {
-        t.equal(text, 'Auth Success', 'User should be authenticated');
-        page.logOutButton().click();
-        return page.output().getText().then(function(text) {
-          t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
-        })
+            return page.logOutButton()
+              .then(webElement => webElement.click())
+              .then(() => page.output().getText()
+                .then(text => {
+                  t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+                })
+              );
+          }));
       })
-    })
+    );
+});
+
+test('Login should not change tokens when they are valid', t => {
+  t.plan(3);
+
+  return page.get(app.port).then(() =>
+    page.logInButton().click().then(() =>
+      page.login('test-admin', 'password').then(() =>
+        page.events().getText().then(text => {
+          t.equal(text, 'Auth Success', 'User should be authenticated');
+          return page.output().getText().then(firstToken =>
+            page.logInButton().click().then( // Invoke login for the second time, token shouldn't be changed
+              page.output().getText().then(secondToken => {
+                t.equal(secondToken, firstToken, 'Token should not be changed as first session is still valid');
+                page.logOutButton().click();
+                return page.output().getText().then(text => {
+                  t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+                });
+              })
+            )
+          );
+        })
+      )
+    )
+  );
+});
+
+test('SSO should work for nodejs app and testRealmAccountPage', t => {
+  return page.get(app.port).then(() =>
+    page.logInButton().click().then(() =>
+      page.login('test-admin', 'password').then(() =>
+        page.events().getText().then(text => {
+          t.equal(text, 'Auth Success', 'User should be authenticated');
+
+          return realmAccountPage.get().then(() =>
+            driver.getCurrentUrl().then(currentUrl => {
+              t.equal(currentUrl, realmAccountPage.getUrl(), 'Should be on account page');
+
+              return realmAccountPage.logout().then(() =>
+                driver.getCurrentUrl().then(currentUrl => {
+                  t.true(currentUrl.startsWith('http://127.0.0.1:8080/auth/realms/test-realm/protocol/openid-connect/auth'), 'Should be on login page after AccountPage logout, current url: ' + currentUrl);
+
+                  return page.get(app.port, '/login').then(() =>
+                    t.true(currentUrl.startsWith('http://127.0.0.1:8080/auth/realms/test-realm/protocol/openid-connect/auth'), 'Should be on login page, current url: ' + currentUrl)
+                  );
+                })
+              );
+            })
+          );
+        })
+      )
+    )
+  );
+});
+
+test('Public client should be redirected to GitHub when idpHint is provided', t => {
+  t.plan(1);
+  var app = new NodeApp();
+  var client = admin.createClient(app.publicClient('appIdP'));
+
+  return client.then((installation) => {
+    app.build(installation, { store: new session.MemoryStore(), idpHint: 'github' });
+    return page.get(app.port, '/restricted')
+      .then(() =>
+        page.h1().getText().then(text => {
+          t.equal(text, 'Sign in to GitHub', 'Application should redirect to GitHub');
+        })
+      ).then(() => {
+        app.destroy();
+      }).catch(err => {
+        app.destroy();
+        throw err;
+      });
   });
-})
+});
 
 test('User should be forbidden to access restricted page', t => {
-  t.plan(1);
-
-  return client.then((installation) => {
-    app.build(installation);
-    page.get(app.port, '/restricted');
-    page.login('alice', 'password');
-
-    return page.body().getText().then(function (text) {
-      t.equal(text, 'Access denied', 'Message should be access denied');
-    }).then(() => {
-      page.get(app.port, '/logout');
-    })
-  });
-})
-
+  return page.get(app.port, '/restricted').then(() =>
+    page.login('alice', 'password').then(() =>
+      page.body().getText().then(text => {
+        t.equal(text, 'Access denied', 'Message should be access denied');
+        return page.logout(app.port); // we need to wait a bit until the logout is fully completed
+      })
+    )
+  );
+});
 
 test('Public client should be forbidden for invalid public key', t => {
   t.plan(2);
@@ -93,44 +172,82 @@ test('Public client should be forbidden for invalid public key', t => {
   return client.then((installation) => {
     installation['realm-public-key'] = TestVector.wrongRealmPublicKey;
     app.build(installation);
-    page.get(app.port);
-
-    return page.output().getText().then(function(text) {
-      t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
-      page.logInButton().click();
-      page.login('test-admin', 'password');
-
-      return page.body().getText().then(function (text) {
-        t.equal(text, 'Access denied', 'Message should be access denied');
-      }).then(() => {
-        app.destroy();
+    return page.get(app.port).then(() =>
+      page.output().getText().then(text => {
+        t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+        return page.logInButton().click().then(() =>
+          page.login('test-admin', 'password').then(() =>
+            page.body().getText().then(text => {
+              t.equal(text, 'Access denied', 'Message should be access denied');
+            })
+          )
+        );
       })
-    })
-  })
-})
+    ).then(() => {
+      app.destroy();
+    }).catch(err => {
+      app.destroy();
+      throw err;
+    });
+  });
+});
 
 test('Confidential client should be forbidden for invalid public key', t => {
-  t.plan(2);
+  t.plan(3);
   var app = new NodeApp();
   var client = admin.createClient(app.confidential('app3'));
 
   return client.then((installation) => {
     installation['realm-public-key'] = TestVector.wrongRealmPublicKey;
     app.build(installation);
-    page.get(app.port);
-
-    return page.output().getText().then(function(text) {
-      t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
-      page.logInButton().click();
-
-      return page.body().getText().then(function (text) {
-        t.equal(text, 'Access denied', 'Message should be access denied');
-      }).then(() => {
-        app.destroy();
+    return page.get(app.port).then(() =>
+      page.output().getText().then(text => {
+        t.equal(text, 'Init Success (Not Authenticated)', 'User should not be authenticated');
+        return page.logInButton().click().then(() =>
+          page.body().getText().then(text => {
+            t.equal(text, 'Access denied', 'Message should be access denied');
+          })
+            .then(() => page.logout(app.port))
+            .then(() => page.get(app.port, '/check-sso'))
+            .then(() => page.output().getText().then(text => t.equal(text, 'Check SSO Success (Not Authenticated)', 'User should not be authenticated')))
+        );
       })
+    ).then(() => {
+      app.destroy();
+    }).catch(err => {
+      app.destroy();
+      throw err;
+    });
+  });
+});
+
+test('Should test check SSO after logging in and logging out', t => {
+  t.plan(3);
+
+  // make sure user is logged out
+  page.get(app.port, '/check-sso').then(() =>
+    page.output().getText().then(text => {
+      t.equal(text, 'Check SSO Success (Not Authenticated)', 'User should not be authenticated');
+
+      page.logInButton().click().then(() =>
+        page.login('alice', 'password').then(() =>
+          page.get(app.port, '/check-sso').then(() =>
+            page.output().getText().then(text => {
+              t.equal(text, 'Check SSO Success (Authenticated)', 'User should be authenticated');
+              return page.logout(app.port);
+            }).then(() => {
+              page.get(app.port, '/check-sso').then(() =>
+                page.output().getText().then(text => {
+                  t.equal(text, 'Check SSO Success (Not Authenticated)', 'User should not be authenticated');
+                })
+              );
+            })
+          )
+        )
+      );
     })
-  })
-})
+  );
+});
 
 test('teardown', t => {
   return realmManager.then((realm) => {
@@ -138,5 +255,4 @@ test('teardown', t => {
     admin.destroy('test-realm');
     page.quit();
   });
-})
-
+});

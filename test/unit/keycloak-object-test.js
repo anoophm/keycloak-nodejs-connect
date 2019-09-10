@@ -17,7 +17,7 @@
 'use strict';
 
 const test = require('tape');
-const Keycloak = require('../../index');
+const Keycloak = require('../../');
 const UUID = require('../../uuid');
 const session = require('express-session');
 
@@ -41,7 +41,7 @@ test('setup', t => {
   };
 
   let memoryStore = new session.MemoryStore();
-  kc = new Keycloak({store: memoryStore, scope: 'offline_support'}, kcConfig);
+  kc = new Keycloak({ store: memoryStore, scope: 'offline_support' }, kcConfig);
   t.end();
 });
 
